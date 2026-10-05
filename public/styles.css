@@ -245,3 +245,13 @@ tr.pause-row-active td { background: #faf4ff; }
 .review-sealed-tag { color: #1d6b43; background: #e2f5e9; border: 1px solid #b6e2c6; border-radius: 8px; padding: 2px 10px; font-size: 12px; margin-left: 10px; }
 .review-snapshot-toggle { display: flex; gap: 8px; margin-bottom: 10px; }
 #review-pane-live h4, #review-pane-snap h4, #modal-body h4 { margin: 14px 0 8px; font-size: 14px; }
+
+/* 顺延待确认清单 */
+#start-notice-panel .notice-head { font-size: 13px; color: #334; margin-bottom: 8px; }
+#start-notice-panel .notice-head strong { color: #b05a00; }
+.notice-table td, .notice-table th { font-size: 12px; vertical-align: top; }
+.notice-table tr.notice-pending td { background: #fffaf2; }
+.notice-table tr.notice-confirmed td { background: #f6f8f6; color: #77817c; }
+.notice-later { color: #b05a00; font-weight: 600; }
+.notice-earlier { color: #1d6b43; font-weight: 600; }
+.notice-trigger { display: inline-block; background: #e8eef8; border: 1px solid #c2d2ec; color: #254b86; border-radius: 6px; padding: 0 8px; font-size: 11px; }

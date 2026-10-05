@@ -259,6 +259,17 @@ npm start
 - **需放行项须双人放行后才能开始**：本岗位需放行项在双签齐备前「开始」按钮禁用；点「**签认就绪**」提交执行人签认（只能为自己当下有登记权的岗位签认；被代班顶替时不能签认）。目标或任一直接前置项登记行变化、代班变更失去登记权都会使你的签认失效，需重新签认；「放行签认」列实时显示两类签认状态与失效原因；
 - 岗位登记可能被舞监按规定更正（见上节），更正与岗位登记共用行版本号，持旧版本提交会被 409 拒绝。
 
+#### 顺延待确认（本轮新增）
+
+联排现场的顺延若只显示在提示板上，岗位可能漏看。因此每次**岗位登记、舞监更正、跳过链、停排或恢复**使当前执行版某个**尚未开始（未跳过）**提示项的**重算开始时刻**发生变化时，系统都按同次操作的前后重算结果，为该项**所属岗位**留一条**待确认记录**：
+
+- **留痕内容（冻结）**：所属联排版本、提示项（引用与编号）、所属岗位、变更前后重算开始时刻、触发操作类型（岗位登记 / 舞监更正 / 跳过链 / 停排 / 恢复）与可读说明、触发操作者与时间；
+- **同次操作影响多项分别留痕**（一次登记顺延多个岗位即产生多条）；重算开始时刻**未变化或操作后已跳过 / 已开始 / 已完成的项不留痕**；触发操作**失败整体回滚时不留任何待确认记录**；
+- **岗位授权随当下有效**：执行账号只能查看与确认自己当下**有权负责岗位**的记录（含通过代班获得的岗位；自己岗位被代班期间失权）；**代班期间原账号失权、代班账号接手**；舞监不代确认；
+- **确认须携带所见记录版本 `recordVersion`**（待确认为 `1`，确认后变为 `2`）：重复确认返回 409 `NOTICE_STALE` 且**不重复留痕、不改确认人**；记录所属版本归档（发布新版）后旧提交 409 `NOTICE_VERSION_ARCHIVED`；权限变化后旧提交 403 `FORBIDDEN`，**不误确认**；
+- **舞监可看全部记录及未确认数**（含按岗位汇总）；**旧联排版本只读回看**（「发布版本 → 回看」内顺延记录表；执行账号在旧版按该版代班记录确定可见岗位）；**发布新版不承接旧版待确认**，新版顺延记录从空开始；
+- 「现场联排」页的「**顺延待确认**」面板显示待确认清单，执行账号逐行点「确认」，操作成功后提示本次新增条数。
+
 ### 已发布版本回看
 
 「发布版本」页列出全部历史版本（版本号、说明、发布时间、登记数量、复盘封存标记），点击「回看」查看该版本冻结的提示项、前置关系与当时/最新的现场重算结果；每行可点「来源」查看该版本下排期开始时刻的来源链（只读，与同一版本重算结果一致）；舞监还可在回看页查看每行的**更正记录**（更正前后值、操作者、时间、原因）与需放行项的**签认记录**（签认人、时间、目标与直接前置行版本快照、失效原因），归档版本为只读、不能更正或签认。舞监点每版的「**复盘**」按钮可回看该版**实时明细与已封存复盘快照**（未封存时仅实时明细）。
@@ -340,6 +351,11 @@ SESSION_SECRET=your-long-random-secret
 | GET | `/api/live/review` | 舞监 | **当前执行版复盘实时预览**：逐项状态（本版完成 / 交接自旧版完成 / 进行中 / 未开始 / 已跳过）、开始有符号偏差、实际持续分钟、停排扣除分钟、净执行分钟，及按岗位汇总与封存依据 `basis`；无版本 409 `NO_LIVE_VERSION` |
 | POST | `/api/live/review/seal` | 舞监 | **封存当前执行版复盘**：`{versionId, note?, basis}`（basis 取自预览，含全部登记行版本与停排状态）；任一依据变化 409 `REVIEW_BASIS_STALE` 整体拒绝，归档版 409 `REVIEW_VERSION_STALE`，每版重复封存 409 `REVIEW_ALREADY_SEALED`；明细与汇总作为不可改写快照保存 |
 | GET | `/api/versions/:id/review` | 舞监 | **历史版复盘回看**：该版实时明细 `live` 与已封存快照 `snapshot`（未封存为 null），并带封存依据与封存信息 |
+| GET | `/api/live/start-change-notices` | 已登录 | **顺延待确认清单（当前执行版）**：执行账号仅返回当下有权负责岗位（代班随动）的记录；舞监返回全部记录、待确认总数与按岗位待确认数 `pendingByPosition`。每条含冻结版本 / 提示项 / 岗位 / 前后时刻 / 触发操作 / 触发人时间 / `recordVersion` / 确认人与时间 |
+| GET | `/api/versions/:id/start-change-notices` | 已登录 | **指定版本顺延记录回看（只读）**：口径同上；旧联排版本只读，无确认入口；执行账号按该版代班记录圈定可见岗位 |
+| POST | `/api/live/start-change-notices/:id/confirm` | 执行岗位 | **确认一条顺延记录（仅当前执行版）**：请求体 `{recordVersion}`（所见记录版本，待确认为 1）；权限变化 403 `FORBIDDEN`、版本归档 409 `NOTICE_VERSION_ARCHIVED`、重复确认 / 旧版本 409 `NOTICE_STALE`（不重复留痕），不存在 404；成功返回 `{confirmedId, confirmedAt, notices}` |
+
+> 登记 `/api/registrations`、更正 `/api/registrations/corrections`、跳过 `/api/live/skips`、停排 / 恢复等原有响应保持不变，仅**新增**一个可选字段 `startChangeNotices`：本次操作新留痕的顺延待确认记录条数（0 表示无）。
 
 ## 八、登记交接 API 调用示例
 
@@ -1421,3 +1437,160 @@ curl -b sm.cookie -s -X PUT http://localhost:3000/api/draft/cues/4 \
 - **升级前已发布、没有资源数据的旧版本**：`resources` 为 `[]`、每行 `resourceUsages` 为 `[]`、`resourceAlerts` 为 `[]`，页面不显示资源列告警，行为与升级前完全一致；
 - 数据库表 `draft_resources` / `draft_cue_resources` / `published_resources` / `published_cue_resources` 由建表脚本幂等创建（`CREATE TABLE IF NOT EXISTS`），旧库重启即自动补齐，不影响既有数据与启动流程。
 
+## 十七、顺延待确认 API 调用示例（本轮新增）
+
+以本地默认端口 3000 为例（`curl -c/-b` 复用会话 Cookie）。示例计划：L1（灯光，19:00）→ S1（音响，19:05）→ S2/L2（19:12/19:10）→ L3（19:20），P1（道具，19:05）依赖 L1。
+
+### 1. 岗位登记顺延后：响应带新增条数，查询待确认清单
+
+```bash
+# 登录舞监 / 灯光 / 音响
+curl -c sm.cookie    -s -X POST http://localhost:3000/api/login -H 'Content-Type: application/json' \
+  -d '{"username":"sm","password":"sm12345"}'
+curl -c light.cookie -s -X POST http://localhost:3000/api/login -H 'Content-Type: application/json' \
+  -d '{"username":"light","password":"light123"}'
+curl -c sound.cookie -s -X POST http://localhost:3000/api/login -H 'Content-Type: application/json' \
+  -d '{"username":"sound","password":"sound123"}'
+
+# 发布第 1 版（原有响应不变）
+curl -b sm.cookie -s -X POST http://localhost:3000/api/publish -H 'Content-Type: application/json' -d '{"version":0}'
+
+# 灯光把 L1 完成时间推迟到 19:08（原计划 19:00–19:05），后续未开始项全部顺延
+curl -b light.cookie -s -X POST http://localhost:3000/api/registrations -H 'Content-Type: application/json' \
+  -d '{"versionId":1,"cueRef":1,"rowVersion":1,"action":"start","time":"19:07"}'
+curl -b light.cookie -s -X POST http://localhost:3000/api/registrations -H 'Content-Type: application/json' \
+  -d '{"versionId":1,"cueRef":1,"rowVersion":2,"action":"complete","time":"19:08"}'
+# 原有响应字段（version/...）保持兼容，仅新增 startChangeNotices：
+# {"version":{...原有现场重算...},"startChangeNotices":5}
+# 说明：完成登记使 S1/P1/L2/S2/L3 五项未开始项重算开始时刻变化 → 按岗位分别留 5 条待确认记录。
+```
+
+执行账号只看到自己有权负责岗位的记录（`scope:"mine"`，含冻结版本、前后时刻、触发操作与记录版本）：
+
+```bash
+curl -b sound.cookie -s http://localhost:3000/api/live/start-change-notices
+```
+
+```json
+{
+  "versionId": 1, "versionNo": 1, "scope": "mine", "positions": ["音响"],
+  "totalCount": 4, "pendingCount": 4, "confirmedCount": 0,
+  "pendingByPosition": [{ "position": "音响", "count": 4 }],
+  "records": [
+    {
+      "id": 4, "versionId": 1, "versionNo": 1, "cueRef": 5, "code": "S2", "position": "音响",
+      "beforeMinute": 1152, "afterMinute": 1155, "beforeText": "19:12", "afterText": "19:15",
+      "deltaMinutes": 3, "triggerAction": "register",
+      "triggerDetail": "岗位登记：灯光执行 为「L1」登记实际完成 19:08",
+      "triggerCueRef": 1, "triggeredBy": "灯光执行", "triggeredAt": "2026-10-05 20:17:31",
+      "recordVersion": 1, "confirmed": false, "confirmedBy": null, "confirmedAt": null
+    }
+    /* …同一岗位的其余记录（最新在前，同次操作多条分别留痕）… */
+  ]
+}
+```
+
+时刻未变化不留痕：若 L1 仍按计划 19:00 开始、19:05 完成，两次登记响应的 `startChangeNotices` 均为 `0`，清单为空。
+
+### 2. 岗位确认（须携带所见记录版本）
+
+```bash
+# 从清单取记录 id 与 recordVersion（待确认固定为 1）后确认
+curl -b sound.cookie -s -X POST \
+  http://localhost:3000/api/live/start-change-notices/4/confirm \
+  -H 'Content-Type: application/json' -d '{"recordVersion":1}'
+```
+
+```json
+{
+  "confirmedId": 4, "confirmedAt": "2026-10-05 20:19:02",
+  "notices": { "versionId": 1, "pendingCount": 3, "records": [ /* 刷新后的清单 */ ] }
+}
+```
+
+- 不带 / 带非整数 `recordVersion` → 400 `BAD_INPUT`；
+- 重复确认（再次提交 `recordVersion:1`）→ 409 `NOTICE_STALE`（提示确认人与时间，**不重复留痕**，确认人 / 时间保持首次值）；
+- 拿旧清单、所见版本已过期 → 409 `NOTICE_STALE`（响应含 `currentRecordVersion`），刷新后再确认。
+
+### 3. 权限随代班交接：原账号失权、代班账号接手
+
+```bash
+# 舞监启用代班：音响岗位由灯光账号 light 代班（仅当前执行版）
+curl -b sm.cookie -s -X POST http://localhost:3000/api/live/deputies \
+  -H 'Content-Type: application/json' -d '{"versionId":1,"position":"音响","username":"light"}'
+
+# 原岗位账号 sound 再确认音响记录 → 403，拒绝且不误确认
+curl -b sound.cookie -s -X POST http://localhost:3000/api/live/start-change-notices/4/confirm \
+  -H 'Content-Type: application/json' -d '{"recordVersion":1}'
+# {"error":"FORBIDDEN","message":"该记录属于岗位「音响」，当前账号已不再拥有该岗位的确认权（可能由代班账号接手），不能确认"}
+
+# light 的清单 positions 变为 ["灯光","音响"]，可确认音响记录；撤销代班后权限还原
+```
+
+舞监查询同一接口（`scope:"all"`）可看全部记录与按岗位未确认数：
+
+```json
+{ "scope": "all", "positions": null, "totalCount": 10, "pendingCount": 9,
+  "pendingByPosition": [ {"position":"道具","count":2}, {"position":"灯光","count":3}, {"position":"音响","count":4} ] }
+```
+
+舞监账号不代岗位确认，调用确认接口返回 403 `FORBIDDEN`（「舞监仅可查看」）。
+
+### 4. 停排 / 恢复 / 更正 / 跳过链的留痕口径
+
+```bash
+# 停排：未开始项重算开始被「不得早于停排时刻」托住的，按岗位逐条留痕
+curl -b sm.cookie -s -X POST http://localhost:3000/api/live/interruptions \
+  -H 'Content-Type: application/json' -d '{"versionId":1,"pauseText":"19:30","reason":"设备故障"}'
+# {"version":{...},"interruption":{...},"clearedEstimatedEnds":0,"startChangeNotices":5}
+
+# 恢复：重算开始由停排时刻改托恢复时刻（含依赖顺延），变化项继续逐条留痕
+curl -b sm.cookie -s -X POST http://localhost:3000/api/live/interruptions/resume \
+  -H 'Content-Type: application/json' -d '{"versionId":1,"resumeText":"19:40"}'
+# {"version":{...},"interruption":{...},"startChangeNotices":5}
+
+# 舞监更正：触发说明冻结为「舞监更正：「L1」实际开始 19:00 → 19:09（原因：…）」
+curl -b sm.cookie -s -X POST http://localhost:3000/api/registrations/corrections \
+  -H 'Content-Type: application/json' \
+  -d '{"versionId":1,"cueRef":1,"rowVersion":3,"field":"actual_start","actualStartText":"19:09","reason":"核对录像更正"}'
+# {"version":{...},"cascaded":false,"startChangeNotices":5}
+
+# 跳过链：本链被跳过项自身（操作后为 SKIPPED）不留痕；
+# 只有链外因失去跳过前置约束等而改变重算开始的未开始项才留痕（种子计划中为 0）
+curl -b sm.cookie -s -X POST http://localhost:3000/api/live/skips \
+  -H 'Content-Type: application/json' \
+  -d '{"versionId":1,"cueRef":2,"reason":"设备未到位","items":[{"cueRef":2,"rowVersion":1},"...预览链全部项..."]}'
+# {"version":{...},"skip":{...},"startChangeNotices":0}
+```
+
+任一触发操作失败（行版本过期、跳过链存在已开始阻断项、停排时刻覆盖已登记实际时刻等）都在同一事务内整体回滚，**不写入任何顺延记录**。
+
+### 5. 发布新版：旧记录只读回看、不承接；拒绝归档旧提交
+
+```bash
+# 发布第 2 版后，当前执行版清单从空开始
+curl -b sm.cookie -s http://localhost:3000/api/live/start-change-notices
+# {"versionId":2,"versionNo":2,"totalCount":0,"pendingCount":0,...}
+
+# 旧版记录仍可按版本只读回看（执行账号按该版代班记录圈定岗位，舞监可见全部）
+curl -b light.cookie -s http://localhost:3000/api/versions/1/start-change-notices
+
+# 对旧版未确认记录再提交确认 → 409，旧版只读
+curl -b light.cookie -s -X POST http://localhost:3000/api/live/start-change-notices/20/confirm \
+  -H 'Content-Type: application/json' -d '{"recordVersion":1}'
+# {"error":"NOTICE_VERSION_ARCHIVED","message":"该记录所属联排版本已归档（发布新版不承接旧版待确认），旧版记录只读回看，不能再确认"}
+```
+
+### 6. 错误一览
+
+| 场景 | 状态码 | error |
+| --- | --- | --- |
+| 未登录访问清单 / 确认 | 401 | `UNAUTHORIZED` |
+| 确认缺少 / 非法 `recordVersion`、记录 id 非法 | 400 | `BAD_INPUT` |
+| 非本账号有权负责岗位（含被代班顶替）/ 舞监尝试确认 | 403 | `FORBIDDEN` |
+| 记录不存在（含已删除版本级联） | 404 | `NOT_FOUND` |
+| 记录所属版本已归档（发布新版）后确认 | 409 | `NOTICE_VERSION_ARCHIVED` |
+| 重复确认 / 所见记录版本过期 | 409 | `NOTICE_STALE`（不重复留痕，响应含 `currentRecordVersion` / `confirmedBy` / `confirmedAt`） |
+| 触发操作本身失败（登记 / 更正 / 跳过 / 停排 / 恢复） | 各自原有状态码 | 同事务回滚，**不留顺延记录**（响应也不产生 `startChangeNotices`） |
+
+页面用法：「现场联排」页新增「**顺延待确认**」面板——执行账号可查看并确认本账号岗位记录；舞监只读查看全部记录与未确认数；「发布版本 → 回看」内附该版顺延记录表（只读）。

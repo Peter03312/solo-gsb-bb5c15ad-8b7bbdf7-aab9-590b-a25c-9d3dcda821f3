@@ -603,6 +603,118 @@ function versionPayload(versionRow) {
   };
 }
 
+// ---------- 现场顺延待确认 ----------
+
+// 对某版本当前全部登记与停排数据做一次只读重算，返回 cue_ref -> {code, position, status, schedStart}
+// 快照。须在触发操作事务的写入前 / 写入后分别调用，比较两次快照以判定「未开始项重算开始时刻」是否变化。
+function liveStartSnapshot(versionId) {
+  const { cues, deps, regMap, interruptions } = versionInputs(versionId);
+  const live = computeLive(cues, deps, regMap, interruptions);
+  const map = new Map();
+  for (const c of live.cues) {
+    map.set(c.id, { code: c.code, position: c.position, status: c.status, schedStart: c.schedStart });
+  }
+  return map;
+}
+
+// 依据同次操作前后的重算快照，为「操作后仍为未开始、重算开始时刻发生变化」的提示项所属岗位
+// 逐条插入待确认记录（同次操作影响多项分别留痕；时刻未变化或操作后已跳过 / 已开始 / 已完成的项不留）。
+// 必须在触发操作的同一事务内调用：触发操作失败回滚时本记录一并回滚。
+function insertStartChangeNotices({
+  versionId, before, after, action, detail, triggerCueRef, actor, stamp,
+}) {
+  const ins = db.prepare(
+    `INSERT INTO start_change_notices(
+       version_id, cue_ref, code, position, before_minute, after_minute,
+       trigger_action, trigger_detail, trigger_cue_ref, triggered_by, triggered_at, row_ver)
+     VALUES (@version_id, @cue_ref, @code, @position, @before_minute, @after_minute,
+       @action, @detail, @trigger_cue_ref, @actor, @stamp, 1)`
+  );
+  let created = 0;
+  // 按提示项发布顺序（id 升序）留痕，保证同次操作多条记录顺序确定
+  const refs = [...after.keys()].sort((a, b) => a - b);
+  for (const ref of refs) {
+    const a = after.get(ref);
+    if (!a || a.status !== 'PENDING') continue;           // 操作后已跳过 / 已开始 / 已完成：不留
+    const b = before.get(ref);
+    if (!b || b.schedStart === null) continue;
+    if (a.schedStart === b.schedStart) continue;          // 重算开始时刻未变化：不留
+    ins.run({
+      version_id: versionId,
+      cue_ref: ref,
+      code: a.code,
+      position: a.position,
+      before_minute: b.schedStart,
+      after_minute: a.schedStart,
+      action,
+      detail,
+      trigger_cue_ref: triggerCueRef ?? null,
+      actor,
+      stamp,
+    });
+    created += 1;
+  }
+  return created;
+}
+
+function startChangeNoticeJson(n, verRow) {
+  return {
+    id: n.id,
+    versionId: n.version_id,
+    versionNo: verRow ? verRow.version_no : null,
+    cueRef: n.cue_ref,
+    code: n.code,
+    position: n.position,
+    beforeMinute: n.before_minute,
+    afterMinute: n.after_minute,
+    beforeText: minToTime(n.before_minute),
+    afterText: minToTime(n.after_minute),
+    deltaMinutes: n.after_minute - n.before_minute,
+    triggerAction: n.trigger_action,
+    triggerDetail: n.trigger_detail,
+    triggerCueRef: n.trigger_cue_ref,
+    triggeredBy: n.triggered_by,
+    triggeredAt: n.triggered_at,
+    recordVersion: n.row_ver,
+    confirmed: n.row_ver === 2,
+    confirmedBy: n.confirmed_by,
+    confirmedAt: n.confirmed_at,
+  };
+}
+
+// 待确认清单视图：舞监可看全部记录；执行账号仅能看到自己当下有权负责岗位（含代班获得、被顶替排除）的记录。
+// 记录按 id 倒序（最新在前）；另返回待确认总数与按岗位的待确认数（舞监含全部岗位，执行账号仅含本账号岗位）。
+function startChangeNoticesEnvelope(verRow, user, scopePositions) {
+  let rows;
+  if (scopePositions && scopePositions.length) {
+    const marks = scopePositions.map(() => '?').join(',');
+    rows = db.prepare(
+      `SELECT * FROM start_change_notices WHERE version_id = ? AND position IN (${marks}) ORDER BY id DESC`
+    ).all(verRow.id, ...scopePositions);
+  } else {
+    rows = db.prepare('SELECT * FROM start_change_notices WHERE version_id = ? ORDER BY id DESC').all(verRow.id);
+  }
+  const records = rows.map((n) => startChangeNoticeJson(n, verRow));
+  const pending = records.filter((r) => !r.confirmed);
+  const pendingByPosition = new Map();
+  for (const r of pending) {
+    pendingByPosition.set(r.position, (pendingByPosition.get(r.position) || 0) + 1);
+  }
+  return {
+    versionId: verRow.id,
+    versionNo: verRow.version_no,
+    scope: user.role === 'sm' ? 'all' : 'mine',
+    positions: scopePositions || null,
+    totalCount: records.length,
+    pendingCount: pending.length,
+    confirmedCount: records.length - pending.length,
+    pendingByPosition: [...pendingByPosition.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0], 'zh'))
+      .map(([position, count]) => ({ position, count })),
+    records,
+  };
+}
+
 // ---------- 认证 ----------
 
 app.post('/api/login', (req, res, next) => {
@@ -1467,6 +1579,9 @@ app.post('/api/registrations', requireAuth, (req, res, next) => {
           `第 ${verRow.version_no} 版已不是当前执行版本（已有新版本发布），请刷新使用最新版本登记`);
       }
 
+      // 顺延留痕：取操作前重算快照，写入后对照，仅对重算开始时刻变化的未开始项按岗位留待确认记录
+      const beforeSnapshot = liveStartSnapshot(versionId);
+
       const pc = db.prepare('SELECT * FROM published_cues WHERE version_id=? AND cue_ref=?').get(versionId, cueRef);
       if (!pc) throw new ApiError(404, 'NOT_FOUND', '提示项不存在于该版本');
 
@@ -1549,12 +1664,25 @@ app.post('/api/registrations', requireAuth, (req, res, next) => {
       ).run({ ...patch, updated_by: actor, updated_at: stamp, id: reg.id });
       // 登记行版本已推进：目标或任一直接前置为本项的有效签认随之失效（同事务，失败整体回滚）
       invalidateSignoffsForCueChange(versionId, cueRef, pc.code, reg.row_ver + 1, stamp);
-      return verRow;
+      // 同事务留痕：本次登记使哪些未开始项重算开始时刻变化，即按岗位分别留待确认记录（失败一并回滚）
+      const registerLabel = { start: '登记实际开始', estimate: '登记预计结束', complete: '登记实际完成' }[action];
+      const registerTime = action === 'estimate' ? minToTime(patch.estimated_end) : minToTime(patch.actual_start ?? patch.actual_end);
+      const noticeCount = insertStartChangeNotices({
+        versionId,
+        before: beforeSnapshot,
+        after: liveStartSnapshot(versionId),
+        action: 'register',
+        detail: `岗位登记：${actor} 为「${pc.code}」${registerLabel} ${registerTime}`,
+        triggerCueRef: cueRef,
+        actor,
+        stamp,
+      });
+      return { verRow, noticeCount };
     })();
 
-    const payload = versionPayload(ver);
-    payload.myPositions = [...effectivePositionsFor(req.session.user, ver.id)];
-    res.json({ version: payload });
+    const payload = versionPayload(ver.verRow);
+    payload.myPositions = [...effectivePositionsFor(req.session.user, ver.verRow.id)];
+    res.json({ version: payload, startChangeNotices: ver.noticeCount });
   } catch (e) { next(e); }
 });
 
@@ -1594,6 +1722,8 @@ app.post('/api/registrations/corrections', requireSM, (req, res, next) => {
     // 更正仅改现场登记，不动 published_cues（已发布计划）。
     // 全部校验与写入在同一事务内：任一不合法均不写入部分更正与历史，行版本与岗位登记共用。
     const result = db.transaction(() => {
+      // 顺延留痕：更正前重算快照（须在任何写入之前）
+      const beforeSnapshot = liveStartSnapshot(versionId);
       const reg = db.prepare('SELECT * FROM registrations WHERE version_id=? AND cue_ref=?').get(versionId, cueRef);
       if (!reg) throw new ApiError(404, 'NOT_FOUND', '登记记录不存在');
       // 已跳过项只展示，舞监也不得更正其时间（跳过清除预计结束不可通过更正恢复）
@@ -1689,12 +1819,25 @@ app.post('/api/registrations/corrections', requireSM, (req, res, next) => {
       });
       // 更正同样推进登记行版本：目标或任一直接前置为本项的有效签认随之失效（同事务）
       invalidateSignoffsForCueChange(versionId, cueRef, pc.code, reg.row_ver + 1, stamp);
-      return { cascaded: history.length > 1 };
+      // 同事务留痕：更正（含级联清除）使哪些未开始项重算开始时刻变化，即按岗位分别留待确认记录
+      const beforeText = minToTime(reg[field]);
+      const afterText = clear ? '清除' : minToTime(newValue);
+      const noticeCount = insertStartChangeNotices({
+        versionId,
+        before: beforeSnapshot,
+        after: liveStartSnapshot(versionId),
+        action: 'correction',
+        detail: `舞监更正：「${pc.code}」${meta.label} ${beforeText} → ${afterText}（原因：${reason}）`,
+        triggerCueRef: cueRef,
+        actor,
+        stamp,
+      });
+      return { cascaded: history.length > 1, noticeCount };
     })();
 
     // 成功后按现有规则重算后续未开始项及岗位冲突（versionPayload 内 computeLive）
     const payload = versionPayload(ver);
-    res.json({ version: payload, cascaded: result.cascaded });
+    res.json({ version: payload, cascaded: result.cascaded, startChangeNotices: result.noticeCount });
   } catch (e) { next(e); }
 });
 
@@ -1866,6 +2009,8 @@ app.post('/api/live/skips', requireSM, (req, res, next) => {
       const pc = db.prepare('SELECT 1 FROM published_cues WHERE version_id=? AND cue_ref=?').get(v.id, cueRef);
       if (!pc) throw new ApiError(404, 'NOT_FOUND', '提示项不存在于当前执行版本');
 
+      // 顺延留痕：跳过前重算快照（已跳过项自身不在结果内，不会为其留痕）
+      const beforeSnapshot = liveStartSnapshot(v.id);
       const closure = successorClosure(v.id, cueRef);
 
       // 提交范围必须与预览的整条依赖链（根 + 全部可达后继）一致，防止漏项或多项
@@ -1950,12 +2095,25 @@ app.post('/api/live/skips', requireSM, (req, res, next) => {
           newlySkipped += 1;
         }
       }
-      return { ver: v, newlySkipped };
+      // 同事务留痕：跳过链使链外未开始项（失去跳过前置的约束等场景）重算开始时刻变化时按岗位留待确认；
+      // 本链新跳过项操作后为 SKIPPED，不留记录
+      const noticeCount = insertStartChangeNotices({
+        versionId: v.id,
+        before: beforeSnapshot,
+        after: liveStartSnapshot(v.id),
+        action: 'skip',
+        detail: `跳过链：${actor} 将「${cueMap.get(cueRef)?.code || `#${cueRef}`}」及其后继共 ${closure.size} 项标记跳过（原因：${reason}）`,
+        triggerCueRef: cueRef,
+        actor,
+        stamp,
+      });
+      return { ver: v, newlySkipped, noticeCount };
     })();
 
     const payload = versionPayload(ver.ver);
     res.json({
       version: payload,
+      startChangeNotices: ver.noticeCount,
       skip: {
         rootCueRef: cueRef,
         rootCode: publishedCueMap(ver.ver.id).get(cueRef)?.code ?? null,
@@ -2160,6 +2318,8 @@ app.post('/api/live/interruptions', requireSM, (req, res, next) => {
         throw new ApiError(409, 'VERSION_ARCHIVED',
           `第 ${verRow.version_no} 版已不是当前执行版本（已有新版本发布），请刷新使用当前执行版本停排`);
       }
+      // 顺延留痕：停排前重算快照（须在清除预计结束、写入停排记录之前）
+      const beforeSnapshot = liveStartSnapshot(versionId);
       if (activeInterruption(versionId)) {
         throw new ApiError(409, 'INTERRUPTION_EXISTS',
           `第 ${verRow.version_no} 版已有一段进行中的停排，请先恢复后再发起新的停排`);
@@ -2232,7 +2392,19 @@ app.post('/api/live/interruptions', requireSM, (req, res, next) => {
          WHERE version_id = ? AND active = 1`
       ).run(`联排于 ${minToTime(pauseMinute)} 停排（${reason}），停排前双签失效，须恢复后重新签认`, stamp, versionId);
 
-      return { verRow, interruptionId: info.lastInsertRowid, clearedCount };
+      // 同事务留痕：停排使未开始项重算开始被「不得早于停排时刻」托住时，按岗位分别留待确认记录
+      const noticeCount = insertStartChangeNotices({
+        versionId,
+        before: beforeSnapshot,
+        after: liveStartSnapshot(versionId),
+        action: 'pause',
+        detail: `停排：${actor} 登记 ${minToTime(pauseMinute)} 起停排（原因：${reason}），未开始项重算开始不早于该时刻`,
+        triggerCueRef: null,
+        actor,
+        stamp,
+      });
+
+      return { verRow, interruptionId: info.lastInsertRowid, clearedCount, noticeCount };
     })();
 
     const payload = versionPayload(result.verRow);
@@ -2240,6 +2412,7 @@ app.post('/api/live/interruptions', requireSM, (req, res, next) => {
       version: payload,
       interruption: payload.activeInterruption,
       clearedEstimatedEnds: result.clearedCount,
+      startChangeNotices: result.noticeCount,
     });
   } catch (e) {
     if (String(e.code || '').includes('SQLITE_CONSTRAINT')) {
@@ -2262,6 +2435,8 @@ app.post('/api/live/interruptions/resume', requireSM, (req, res, next) => {
     const verRow = db.transaction(() => {
       const verRow = db.prepare('SELECT * FROM rehearsal_versions WHERE id = ?').get(versionId);
       if (!verRow) throw new ApiError(404, 'NOT_FOUND', '联排版本不存在');
+      // 顺延留痕：恢复前重算快照（停排进行中：未开始项被停排时刻托住；恢复后改为恢复时刻）
+      const beforeSnapshot = liveStartSnapshot(versionId);
       const latest = latestPublishedVersion();
       if (!latest || latest.id !== verRow.id) {
         throw new ApiError(409, 'VERSION_ARCHIVED',
@@ -2302,14 +2477,26 @@ app.post('/api/live/interruptions/resume', requireSM, (req, res, next) => {
       db.prepare(
         'UPDATE rehearsal_interruptions SET resume_minute = ?, resumed_by = ?, resumed_at = ? WHERE id = ?'
       ).run(resumeMinute, req.session.user.displayName, stamp, active.id);
-      return verRow;
+      // 同事务留痕：恢复使未开始项重算开始由停排时刻改托恢复时刻（含依赖顺延）时，按岗位分别留待确认记录
+      const noticeCount = insertStartChangeNotices({
+        versionId,
+        before: beforeSnapshot,
+        after: liveStartSnapshot(versionId),
+        action: 'resume',
+        detail: `恢复：${req.session.user.displayName} 于 ${minToTime(resumeMinute)} 恢复联排，未开始项重算开始不早于恢复时刻`,
+        triggerCueRef: null,
+        actor: req.session.user.displayName,
+        stamp,
+      });
+      return { verRow, noticeCount };
     })();
 
-    const payload = versionPayload(verRow);
+    const payload = versionPayload(verRow.verRow);
     const rec = payload.interruptions.find((it) => it.active === false && it.resumeText === minToTime(resumeMinute));
     res.json({
       version: payload,
       interruption: rec || null,
+      startChangeNotices: verRow.noticeCount,
     });
   } catch (e) { next(e); }
 });
@@ -2596,6 +2783,102 @@ app.post('/api/live/review/seal', requireSM, (req, res, next) => {
     }
     next(e);
   }
+});
+
+// ---------- 现场顺延待确认：查询与确认 ----------
+
+// 当前执行版待确认清单：执行账号仅返回当下有权负责岗位（含代班获得、被代班顶替排除）的记录；
+// 舞监返回全部记录，并按岗位汇总待确认数。尚未发布版本时返回空清单。
+app.get('/api/live/start-change-notices', requireAuth, (req, res, next) => {
+  try {
+    const ver = latestPublishedVersion();
+    if (!ver) {
+      return res.json({
+        versionId: null, versionNo: null, scope: req.session.user.role === 'sm' ? 'all' : 'mine',
+        positions: [], totalCount: 0, pendingCount: 0, confirmedCount: 0,
+        pendingByPosition: [], records: [],
+      });
+    }
+    const user = req.session.user;
+    const scopePositions = user.role === 'operator'
+      ? [...effectivePositionsFor(user, ver.id)].sort((a, b) => a.localeCompare(b, 'zh'))
+      : null;
+    res.json(startChangeNoticesEnvelope(ver, user, scopePositions));
+  } catch (e) { next(e); }
+});
+
+// 指定版本顺延记录回看（当前执行版与旧联排版通用）：
+// 执行账号仅能看到自己在该版有权负责岗位（代班以该版在任记录为准）的记录；旧版只读，无确认入口。
+app.get('/api/versions/:id/start-change-notices', requireAuth, (req, res, next) => {
+  try {
+    const ver = db.prepare('SELECT * FROM rehearsal_versions WHERE id = ?').get(Number(req.params.id));
+    if (!ver) throw new ApiError(404, 'NOT_FOUND', '版本不存在');
+    const user = req.session.user;
+    const scopePositions = user.role === 'operator'
+      ? [...effectivePositionsFor(user, ver.id)].sort((a, b) => a.localeCompare(b, 'zh'))
+      : null;
+    res.json(startChangeNoticesEnvelope(ver, user, scopePositions));
+  } catch (e) { next(e); }
+});
+
+// 岗位确认一条顺延待确认记录（仅执行账号、仅当前执行版）：
+// 必须提交查看记录时所见的记录版本 recordVersion（待确认为 1）。
+// - 记录不存在：404 NOT_FOUND
+// - 不属于当前账号有权负责的岗位（含代班期间原账号失权、代班账号接手）：403 FORBIDDEN，不误确认
+// - 版本已归档（发布新版不承接待确认）：409 NOTICE_VERSION_ARCHIVED
+// - 所见记录版本已过期或记录已被确认：409 NOTICE_STALE，重复确认不重复留痕、不更新确认人 / 时间
+app.post('/api/live/start-change-notices/:noticeId/confirm', requireAuth, (req, res, next) => {
+  try {
+    if (req.session.user.role !== 'operator') {
+      throw new ApiError(403, 'FORBIDDEN', '顺延记录由对应岗位执行账号确认，舞监仅可查看');
+    }
+    const noticeId = Number(req.params.noticeId);
+    if (!Number.isInteger(noticeId)) throw new ApiError(400, 'BAD_INPUT', '缺少有效的记录 id');
+    const recordVersion = Number(req.body?.recordVersion);
+    if (!Number.isInteger(recordVersion)) {
+      throw new ApiError(400, 'BAD_INPUT', '确认须携带所见记录版本 recordVersion');
+    }
+    const user = req.session.user;
+
+    const result = db.transaction(() => {
+      const n = db.prepare('SELECT * FROM start_change_notices WHERE id = ?').get(noticeId);
+      if (!n) throw new ApiError(404, 'NOT_FOUND', '顺延待确认记录不存在');
+      // 权限随当下授权实时复核：代班期间原岗位账号失权、代班账号接手，失权旧提交 403 不误确认
+      if (!effectivePositionsFor(user, n.version_id).has(n.position)) {
+        throw new ApiError(403, 'FORBIDDEN',
+          `该记录属于岗位「${n.position}」，当前账号已不再拥有该岗位的确认权（可能由代班账号接手），不能确认`);
+      }
+      const latest = latestPublishedVersion();
+      if (!latest || latest.id !== n.version_id) {
+        throw new ApiError(409, 'NOTICE_VERSION_ARCHIVED',
+          '该记录所属联排版本已归档（发布新版不承接旧版待确认），旧版记录只读回看，不能再确认');
+      }
+      // 重复确认 / 旧版本提交：明确拒绝且不写入，不重复留痕
+      if (n.row_ver === 2) {
+        throw new ApiError(409, 'NOTICE_STALE',
+          `该顺延记录已由 ${n.confirmed_by} 于 ${n.confirmed_at} 确认，无需重复确认`,
+          { currentRecordVersion: 2, confirmedBy: n.confirmed_by, confirmedAt: n.confirmed_at });
+      }
+      if (recordVersion !== n.row_ver) {
+        throw new ApiError(409, 'NOTICE_STALE',
+          `所见顺延记录版本（v${recordVersion}）与当前版本（v${n.row_ver}）不一致，请刷新清单后再确认`,
+          { currentRecordVersion: n.row_ver });
+      }
+      const stamp = new Date().toLocaleString('sv-SE');
+      db.prepare(
+        'UPDATE start_change_notices SET row_ver = 2, confirmed_by = ?, confirmed_at = ? WHERE id = ? AND row_ver = 1'
+      ).run(user.displayName, stamp, n.id);
+      return { noticeId, stamp, versionId: n.version_id };
+    })();
+
+    const ver = db.prepare('SELECT * FROM rehearsal_versions WHERE id = ?').get(result.versionId);
+    const scopePositions = [...effectivePositionsFor(user, ver.id)].sort((a, b) => a.localeCompare(b, 'zh'));
+    res.json({
+      confirmedId: result.noticeId,
+      confirmedAt: result.stamp,
+      notices: startChangeNoticesEnvelope(ver, user, scopePositions),
+    });
+  } catch (e) { next(e); }
 });
 
 // ---------- 静态页面与错误处理 ----------

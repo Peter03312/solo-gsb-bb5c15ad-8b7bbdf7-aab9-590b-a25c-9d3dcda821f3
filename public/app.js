@@ -14,6 +14,8 @@ const state = {
   skipPreview: null,
   whatifInputs: new Map(),
   reviewEnv: null,
+  notices: null,
+  detailNotices: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -598,11 +600,105 @@ async function loadLive() {
     try { state.deputies = await api('GET', '/api/live/deputies'); }
     catch { state.deputies = null; }
   }
+  await loadStartNotices().catch(() => { state.notices = null; });
   renderLive();
   if (state.me.role === 'sm' && state.live) {
     loadReviewLive().catch(() => { state.reviewEnv = null; renderReviewPanel(); });
   }
 }
+
+// ---------- 顺延待确认 ----------
+
+async function loadStartNotices() {
+  state.notices = await api('GET', '/api/live/start-change-notices');
+  renderStartNotices();
+  return state.notices;
+}
+
+// 重算类操作（登记 / 更正 / 跳过 / 停排 / 恢复）成功后刷新顺延待确认清单；
+// 返回本次新留痕条数对应的补充提示语（无新增时为空串），由调用方拼入既有 alertBar，避免重复弹条
+async function refreshNoticesAfterMutation(data) {
+  await loadStartNotices().catch(() => {});
+  const n = data?.startChangeNotices;
+  if (typeof n === 'number' && n > 0) {
+    return `已为受影响岗位新增 ${n} 条顺延待确认记录，请相关岗位在「顺延待确认」中确认。`;
+  }
+  return '';
+}
+
+const TRIGGER_ACTION_LABEL = {
+  register: '岗位登记',
+  correction: '舞监更正',
+  skip: '跳过链',
+  pause: '停排',
+  resume: '恢复',
+};
+
+function renderStartNotices() {
+  const panel = $('#start-notice-panel');
+  if (!panel) return;
+  const v = state.live;
+  const data = state.notices;
+  if (!v || !data) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const box = $('#start-notice-body');
+  const isSM = state.me.role === 'sm';
+  const head = isSM
+    ? `<div class="notice-head">全部顺延记录（舞监只读）：共 ${data.totalCount} 条，<strong>待确认 ${data.pendingCount}</strong>，已确认 ${data.confirmedCount}
+         ${data.pendingByPosition.length ? '｜' + data.pendingByPosition.map((p) => `${esc(p.position)} ${p.count}`).join('、') : ''}</div>`
+    : `<div class="notice-head">本账号有权负责岗位${data.positions?.length ? `（${data.positions.map(esc).join('、')}）` : ''}的顺延记录：
+         共 ${data.totalCount} 条，<strong>待确认 ${data.pendingCount}</strong>，已确认 ${data.confirmedCount}</div>`;
+  if (!data.records.length) {
+    box.innerHTML = head + '<div class="muted">暂无顺延记录。</div>';
+    return;
+  }
+  const rows = data.records.map((r) => {
+    const delta = r.deltaMinutes > 0
+      ? `<span class="notice-later">顺延 +${r.deltaMinutes} 分</span>`
+      : `<span class="notice-earlier">提前 ${r.deltaMinutes} 分</span>`;
+    const actionBtn = (!isSM && !r.confirmed)
+      ? `<button class="primary tiny" data-act="confirm-notice" data-id="${r.id}" data-ver="${r.recordVersion}">确认</button>`
+      : '';
+    const status = r.confirmed
+      ? `<span class="badge done">已确认</span><div class="muted">${esc(r.confirmedBy || '')}<br>${esc(r.confirmedAt || '')}</div>`
+      : '<span class="badge pending">待确认</span>';
+    return `<tr class="${r.confirmed ? 'notice-confirmed' : 'notice-pending'}">
+      <td>${status}</td>
+      <td><strong>${esc(r.code)}</strong><div class="muted">第 ${r.versionNo} 版</div></td>
+      <td>${esc(r.position)}</td>
+      <td class="mono">${esc(r.beforeText)} → <strong>${esc(r.afterText)}</strong><div>${delta}</div></td>
+      <td><span class="notice-trigger">${esc(TRIGGER_ACTION_LABEL[r.triggerAction] || r.triggerAction)}</span><div class="muted">${esc(r.triggerDetail)}</div></td>
+      <td class="mono">${esc(r.triggeredBy)}<br>${esc(r.triggeredAt)}</td>
+      <td>v${r.recordVersion}</td>
+      <td>${actionBtn}</td>
+    </tr>`;
+  }).join('');
+  box.innerHTML = `${head}
+    <div class="table-wrap notice-table">
+      <table>
+        <thead><tr><th>状态</th><th>提示项</th><th>岗位</th><th>重算开始（前 → 后）</th><th>触发操作</th><th>操作者 / 时间</th><th>记录版本</th><th>操作</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+$('#start-notice-panel').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-act="confirm-notice"]');
+  if (!btn) return;
+  const id = Number(btn.dataset.id);
+  const recordVersion = Number(btn.dataset.ver);
+  btn.disabled = true;
+  try {
+    const data = await api('POST', `/api/live/start-change-notices/${id}/confirm`, { recordVersion });
+    state.notices = data.notices;
+    renderStartNotices();
+    alertBar('ok', '已确认该顺延记录。');
+  } catch (e) {
+    btn.disabled = false;
+    alertBar('error', errorToHtml(e), 9000);
+    if (e.status === 409 || e.status === 403) loadStartNotices().catch(() => {});
+  }
+});
 
 // ---------- 舞监：执行版复盘（实时预览 + 封存） ----------
 
@@ -814,6 +910,7 @@ function renderLive() {
     $('#interruption-panel').hidden = true;
     $('#whatif-panel').hidden = true;
     $('#review-panel').hidden = true;
+    $('#start-notice-panel').hidden = true;
     $('#live-tbody').innerHTML = '';
     $('#live-resource-alerts').innerHTML = '';
     return;
@@ -956,19 +1053,23 @@ $('#interruption-panel').addEventListener('submit', async (ev) => {
       if (!confirm(`确认在 ${pauseText} 停排？\n将清除全部未开始项的原预计结束、停排前有效双签失效；执行岗位登记 / 新签认与发布新版在恢复前一律拒绝。`)) { btn.disabled = false; return; }
       const data = await api('POST', '/api/live/interruptions', { versionId: v.id, pauseText, reason });
       state.live = data.version;
+      const noticeHint = await refreshNoticesAfterMutation(data);
       renderLive();
-      alertBar('error', `⛔ 已在 ${pauseText} 停排（${data.clearedEstimatedEnds} 项未开始预计结束已清除）；恢复后双签须重签。`, 9000);
+      alertBar('error', `⛔ 已在 ${pauseText} 停排（${data.clearedEstimatedEnds} 项未开始预计结束已清除）；恢复后双签须重签。`
+        + (noticeHint ? ` ${noticeHint}` : ''), 10000);
     } else {
       const resumeText = form.elements.resumeText.value;
       if (!resumeText) { alertBar('error', '请填写恢复时刻'); btn.disabled = false; return; }
       if (!confirm(`确认在 ${resumeText} 恢复联排？\n未开始项排期不早于该时刻，已开始未完成项结束顺延该中断分钟。`)) { btn.disabled = false; return; }
       const data = await api('POST', '/api/live/interruptions/resume', { versionId: v.id, resumeText });
       state.live = data.version;
+      const noticeHint = await refreshNoticesAfterMutation(data);
       renderLive();
       const n = data.version.conflicts.length;
       alertBar(n ? 'error' : 'ok',
-        `✅ 已在 ${resumeText} 恢复联排，排期与同岗位冲突已按中断顺延重算。` + (n ? ` 当前 ${n} 项冲突请查看红条。` : ''),
-        n ? 9000 : 6000);
+        `✅ 已在 ${resumeText} 恢复联排，排期与同岗位冲突已按中断顺延重算。` + (n ? ` 当前 ${n} 项冲突请查看红条。` : '')
+        + (noticeHint ? ` ${noticeHint}` : ''),
+        n || noticeHint ? 10000 : 6000);
     }
   } catch (e) {
     btn.disabled = false;
@@ -1073,10 +1174,12 @@ $('#live-tbody').addEventListener('click', async (ev) => {
     const data = await api('POST', '/api/registrations', payload);
     state.live = data.version;
     const hasConflict = data.version.conflicts.length > 0;
+    const noticeHint = await refreshNoticesAfterMutation(data);
     alertBar(hasConflict ? 'error' : 'ok',
-      hasConflict
+      (hasConflict
         ? `登记成功，但出现 ${data.version.conflicts.length} 项顺延岗位冲突，请查看红色提示。`
-        : '登记成功，重算结果已更新。');
+        : '登记成功，重算结果已更新。') + (noticeHint ? ` ${noticeHint}` : ''),
+      noticeHint ? 9000 : undefined);
     renderLive();
   } catch (e) {
     alertBar('error', errorToHtml(e));
@@ -1329,11 +1432,12 @@ $('#modal-overlay').addEventListener('submit', async (ev) => {
     state.skipPreview = null;
     closeModal();
     const n = data.skip.newlySkippedCount;
+    const noticeHint = await refreshNoticesAfterMutation(data);
     alertBar(n ? 'ok' : 'error',
-      n
+      (n
         ? `⛔ 已将以「${data.skip.rootCode}」为根的依赖链 ${n} 项标记为跳过，预计结束已清除，其他项已按现有规则重算。`
-        : '链中项此前均已跳过，本次只展示、未重复留痕。',
-      n ? 8000 : 5000);
+        : '链中项此前均已跳过，本次只展示、未重复留痕。') + (noticeHint ? ` ${noticeHint}` : ''),
+      n || noticeHint ? 9000 : 5000);
     renderLive();
   } catch (e) {
     btn.disabled = false;
@@ -1727,10 +1831,12 @@ $('#modal-overlay').addEventListener('submit', async (ev) => {
     state.live = data.version;
     closeModal();
     const conflictN = data.version.conflicts.length;
+    const noticeHint = await refreshNoticesAfterMutation(data);
     alertBar(conflictN ? 'error' : 'ok',
       (data.cascaded ? '更正成功（清除开始已同时清除完成）。' : '更正成功，后续未开始项已按现有规则重算。')
-      + (conflictN ? ` 当前存在 ${conflictN} 项顺延岗位冲突，请查看红色提示。` : ''),
-      conflictN ? 10000 : 5000);
+      + (conflictN ? ` 当前存在 ${conflictN} 项顺延岗位冲突，请查看红色提示。` : '')
+      + (noticeHint ? ` ${noticeHint}` : ''),
+      conflictN || noticeHint ? 10000 : 5000);
     renderLive();
   } catch (e) {
     if (e.status === 409) {
@@ -1983,6 +2089,8 @@ $('#versions-tbody').addEventListener('click', async (ev) => {
   if (!btn) return;
   try {
     state.detail = await api('GET', `/api/versions/${btn.dataset.id}`);
+    try { state.detailNotices = await api('GET', `/api/versions/${btn.dataset.id}/start-change-notices`); }
+    catch { state.detailNotices = null; }
     renderDetail();
   } catch (e) { alertBar('error', errorToHtml(e)); }
 });
@@ -2052,6 +2160,26 @@ function renderDetail() {
             <td class="mono">${it.active ? '—' : `${esc(it.resumedBy)}<br>${esc(it.resumedAt)}`}</td>
           </tr>`).join('')}</tbody>
         </table></div></div>` : '';
+  // 旧版顺延待确认记录只读回看（执行账号仅见本账号岗位；归档版不提供确认入口；新版不承接旧记录）
+  const noticeData = state.detailNotices;
+  const noticeHtml = noticeData && noticeData.records.length
+    ? `<div class="panel"><h3>顺延待确认记录（只读${v.isLatest ? ' · 当前执行版可在「现场联排」确认' : ' · 归档版本'}）</h3>
+        <div class="muted">共 ${noticeData.totalCount} 条：待确认 ${noticeData.pendingCount}、已确认 ${noticeData.confirmedCount}${
+          noticeData.scope === 'mine' ? `（仅本账号岗位：${(noticeData.positions || []).map(esc).join('、') || '无'}）` : '（舞监可看全部岗位）'}</div>
+        <div class="table-wrap notice-table"><table>
+          <thead><tr><th>状态</th><th>提示项</th><th>岗位</th><th>重算开始（前 → 后）</th><th>触发操作</th><th>操作者 / 时间</th><th>确认（操作者 / 时间）</th></tr></thead>
+          <tbody>${noticeData.records.map((r) => `<tr class="${r.confirmed ? 'notice-confirmed' : 'notice-pending'}">
+            <td>${r.confirmed ? '<span class="badge done">已确认</span>' : '<span class="badge pending">待确认</span>'}</td>
+            <td><strong>${esc(r.code)}</strong></td>
+            <td>${esc(r.position)}</td>
+            <td class="mono">${esc(r.beforeText)} → <strong>${esc(r.afterText)}</strong><div>${r.deltaMinutes >= 0 ? `顺延 +${r.deltaMinutes} 分` : `提前 ${r.deltaMinutes} 分`}</div></td>
+            <td><span class="notice-trigger">${esc(TRIGGER_ACTION_LABEL[r.triggerAction] || r.triggerAction)}</span><div class="muted">${esc(r.triggerDetail)}</div></td>
+            <td class="mono">${esc(r.triggeredBy)}<br>${esc(r.triggeredAt)}</td>
+            <td class="mono">${r.confirmed ? `${esc(r.confirmedBy || '')}<br>${esc(r.confirmedAt || '')}` : '<span class="muted">—</span>'}</td>
+          </tr>`).join('')}</tbody>
+        </table></div></div>`
+    : `<div class="panel"><h3>顺延待确认记录（只读）</h3><div class="muted">${
+        noticeData ? '本页可见范围内该版本暂无顺延记录。' : '顺延记录加载失败。'}</div></div>`;
   $('#version-detail').innerHTML = `
     <div class="panel">
       <h3>回看：第 ${v.versionNo} 版（只读）${v.isLatest ? '<span class="latest-tag">当前执行版本</span>' : ''}</h3>
@@ -2063,6 +2191,7 @@ function renderDetail() {
         v.resourceAlerts.map((a) => `<li>${esc(a.message)}</li>`).join('')}</ul></div>` : ''}
     ${interruptionHtml}
     ${deputyHtml}
+    ${noticeHtml}
     <div class="panel"><div class="table-wrap"><table>
       <thead><tr><th>编号</th><th>说明</th><th>岗位</th><th>计划</th><th>共享资源</th><th>重算开始</th><th>重算结束</th><th>状态</th><th>放行签认</th><th>实际开始</th><th>实际完成</th><th>预计结束</th><th>登记人/时间</th>${state.me?.role === 'sm' ? '<th>更正</th>' : ''}</tr></thead>
       <tbody>${v.cues.map((c) => {

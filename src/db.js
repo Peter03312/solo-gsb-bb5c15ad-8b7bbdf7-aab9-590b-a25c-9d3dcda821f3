@@ -216,6 +216,29 @@ CREATE TABLE IF NOT EXISTS rehearsal_reviews (
   sealed_at      TEXT NOT NULL              -- 封存时间
 );
 
+-- 联排现场顺延待确认：每次岗位登记 / 舞监更正 / 跳过链 / 停排 / 恢复使当前执行版某未开始提示项的
+-- 重算开始时刻发生变化时，按同次操作前后结果为该项所属岗位留一条待确认记录。
+-- 冻结所属执行版、提示项引用与编号、岗位、变更前后时刻（分钟）、触发操作与操作者 / 时间；
+-- 同次操作影响多项分别留痕；时刻未变化或已跳过项不留痕；触发操作失败回滚时本记录一并回滚。
+-- 记录只属于其产生时的执行版：发布新版不承接旧版待确认；旧版记录随版本保留，只读回看。
+CREATE TABLE IF NOT EXISTS start_change_notices (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  version_id     INTEGER NOT NULL REFERENCES rehearsal_versions(id) ON DELETE CASCADE,
+  cue_ref        INTEGER NOT NULL,          -- 被顺延的未开始提示项引用
+  code           TEXT NOT NULL,             -- 冻结提示项编号（随版本快照展示）
+  position       TEXT NOT NULL,             -- 冻结提示项所属岗位（按岗位授权查看 / 确认）
+  before_minute  INTEGER NOT NULL,          -- 本次操作前该项重算开始时刻（分钟）
+  after_minute   INTEGER NOT NULL,          -- 本次操作后该项重算开始时刻（分钟）
+  trigger_action TEXT NOT NULL,             -- register / correction / skip / pause / resume
+  trigger_detail TEXT NOT NULL,             -- 触发操作的可读说明（含动作项编号与动作内容）
+  trigger_cue_ref INTEGER,                  -- 触发操作直接作用的提示项引用（停排/恢复为空）
+  triggered_by   TEXT NOT NULL,             -- 触发操作者
+  triggered_at   TEXT NOT NULL,             -- 触发操作时间戳
+  row_ver        INTEGER NOT NULL DEFAULT 1,-- 记录版本：1 待确认；确认后置 2。确认须提交所见版本
+  confirmed_by   TEXT,                      -- 确认操作者（执行账号姓名）
+  confirmed_at   TEXT
+);
+
 -- 签认时直接前置项登记行版本快照（任一变化即失效）
 CREATE TABLE IF NOT EXISTS release_signoff_preds (
   signoff_id  INTEGER NOT NULL REFERENCES release_signoffs(id) ON DELETE CASCADE,
@@ -237,6 +260,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_interruptions_active
   ON rehearsal_interruptions(version_id) WHERE resume_minute IS NULL;
 CREATE INDEX IF NOT EXISTS idx_signoff_preds_signoff ON release_signoff_preds(signoff_id);
 CREATE INDEX IF NOT EXISTS idx_signoff_preds_cue ON release_signoff_preds(cue_ref);
+CREATE INDEX IF NOT EXISTS idx_start_notices_version ON start_change_notices(version_id);
+-- 待确认清单主查询：按版本、岗位（执行账号授权过滤）、待确认状态，最新在前
+CREATE INDEX IF NOT EXISTS idx_start_notices_pending
+  ON start_change_notices(version_id, position, id DESC) WHERE row_ver = 1;
 -- 每个版本每个岗位至多一名在任代班（部分唯一索引）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_deputies_active
   ON position_deputies(version_id, position) WHERE active = 1;
