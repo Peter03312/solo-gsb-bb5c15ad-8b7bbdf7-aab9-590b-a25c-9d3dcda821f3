@@ -1,0 +1,25 @@
+services:
+  cueboard:
+    build: .
+    image: rehearsal-cueboard:latest
+    container_name: rehearsal-cueboard
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      # 服务监听端口（容器内）
+      PORT: 3000
+      TZ: Asia/Shanghai
+      # 会话签名密钥：生产环境请通过 .env 或 shell 环境变量覆盖
+      SESSION_SECRET: ${SESSION_SECRET:-please-change-this-secret}
+    volumes:
+      - cueboard-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/me').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  cueboard-data:

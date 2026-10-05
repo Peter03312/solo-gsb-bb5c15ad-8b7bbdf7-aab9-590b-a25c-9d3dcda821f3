@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>联排提示板</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- 登录页 -->
+  <section id="login-view" class="login-wrap" hidden>
+    <form id="login-form" class="login-card">
+      <h1>🎭 联排提示板</h1>
+      <p class="sub">剧场 Web 联排提示板 · 请登录</p>
+      <label>用户名 <input name="username" autocomplete="username" required /></label>
+      <label>密码 <input name="password" type="password" autocomplete="current-password" required /></label>
+      <div id="login-error" class="error-text" hidden></div>
+      <button type="submit" class="primary">登录</button>
+      <div class="hint">
+        默认账号：舞监 <code>sm / sm12345</code>；灯光 <code>light / light123</code>；
+        音响 <code>sound / sound123</code>；道具 <code>props / props123</code>
+      </div>
+    </form>
+  </section>
+
+  <!-- 主界面 -->
+  <section id="app-view" hidden>
+    <header class="topbar">
+      <div class="brand">🎭 联排提示板</div>
+      <nav id="tabs" class="tabs"></nav>
+      <div class="userbox">
+        <span id="user-tag"></span>
+        <button id="logout-btn" class="ghost">退出</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <div id="alert-bar" class="alert" hidden></div>
+
+      <!-- 舞监：草稿编辑 -->
+      <div id="tab-draft" class="tabpane" hidden>
+        <div class="pane-head">
+          <h2>提示项草稿 <small id="draft-ver"></small></h2>
+          <button id="draft-reload" class="ghost">刷新草稿</button>
+        </div>
+
+        <div id="validation-panel" class="panel"></div>
+
+        <div class="grid2">
+          <div class="panel">
+            <h3 id="cue-form-title">新增提示项</h3>
+            <form id="cue-form" class="cue-form">
+              <input type="hidden" name="id" />
+              <input type="hidden" name="rowVersion" />
+              <div class="form-row">
+                <label>编号 <input name="code" required placeholder="如 L1" /></label>
+                <label>岗位
+                  <select name="position" id="cue-position-select" required></select>
+                </label>
+              </div>
+              <label>说明 <input name="title" placeholder="提示项内容" /></label>
+              <div class="form-row">
+                <label>计划开始 <input name="plannedStartText" type="time" required /></label>
+                <label>时长(分钟) <input name="duration" type="number" min="1" step="1" required /></label>
+              </div>
+              <label class="release-check"><input type="checkbox" name="needsRelease" /> 需放行（须执行人「签认就绪」+ 舞监「签认可执行」齐备后才能登记实际开始；标记随发布冻结）</label>
+              <div class="cue-resource-box">
+                <div class="cue-resource-head">共享资源占用（留空 = 不占用；填写正整数）</div>
+                <div id="cue-resource-fields" class="cue-resource-fields"></div>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="primary" id="cue-submit">新增</button>
+                <button type="button" id="cue-cancel" class="ghost" hidden>取消编辑</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="panel">
+            <h3>前置关系</h3>
+            <form id="dep-form" class="dep-form">
+              <select name="from" id="dep-from" required></select>
+              <span>完成后 →</span>
+              <select name="to" id="dep-to" required></select>
+              <button type="submit" class="primary">添加</button>
+            </form>
+            <div id="dep-list" class="dep-list"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>联排共享资源</h3>
+          <p class="muted">
+            配置联排中容量有限、可被多个提示项同时占用的共享资源（如无线麦、升降台、追光位）：填写<strong>名称与正整数容量</strong>，
+            再在下方各提示项的编辑表单中填写<strong>正整数占用量</strong>（留空表示不占用）。
+            校验按计划<strong>半开时段</strong>累计同一资源占用，超出容量会阻止发布；<strong>仍被提示项引用的资源不能删除</strong>。
+            名称、容量与占用在发布时冻结，草稿后续修改不影响已发布版本。
+          </p>
+          <form id="resource-form" class="resource-form">
+            <input type="hidden" name="id" />
+            <input name="name" maxlength="50" placeholder="资源名称，如：无线麦" required />
+            <input name="capacity" type="number" min="1" step="1" placeholder="容量（正整数）" required />
+            <button type="submit" class="primary" id="resource-submit">新增资源</button>
+            <button type="button" class="ghost" id="resource-cancel" hidden>取消编辑</button>
+          </form>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>名称</th><th>容量</th><th>引用提示项</th><th>操作</th></tr></thead>
+              <tbody id="draft-resource-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>提示项列表</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>编号</th><th>说明</th><th>岗位</th><th>计划开始</th><th>时长</th><th>计划结束</th><th>共享资源占用</th><th>需放行</th><th>前置</th><th>操作</th></tr>
+              </thead>
+              <tbody id="draft-cue-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel publish-panel">
+          <h3>发布只读联排版本</h3>
+          <p class="muted">
+            仅当「前置项计划结束不晚于后项开始、同岗位时段不重叠、依赖无环」全部满足时才能发布。
+            发布后岗位在现场页依据版本登记，草稿仍可继续编辑。
+          </p>
+
+          <div id="handover-box" class="handover-box">
+            <div class="handover-head">
+              <strong>旧执行版登记交接（延续已完成项的实际开始 / 实际完成）</strong>
+              <button id="handover-reload" type="button" class="ghost tiny">重新预览</button>
+            </div>
+            <div id="handover-body" class="handover-body"><span class="muted">加载中…</span></div>
+          </div>
+
+          <div class="publish-row">
+            <input id="publish-note" placeholder="版本说明（可选），如：10 月 5 日联排" />
+            <button id="publish-btn" class="danger">发布联排版本</button>
+          </div>
+          <div id="publish-result"></div>
+        </div>
+      </div>
+
+      <!-- 现场联排 -->
+      <div id="tab-live" class="tabpane" hidden>
+        <div class="pane-head">
+          <h2>现场联排（当前版本）</h2>
+          <button id="live-reload" class="ghost">刷新</button>
+        </div>
+        <div id="live-meta" class="panel"></div>
+        <div id="live-interruption-banner"></div>
+        <div id="live-conflicts"></div>
+        <div id="live-resource-alerts"></div>
+        <div id="live-deputy-banner"></div>
+        <div class="panel" id="interruption-panel" hidden>
+          <h3>联排中断：停排 / 恢复（仅当前执行版）</h3>
+          <p class="muted">
+            联排中断时由舞监为<strong>当前执行版</strong>填写当日 <strong>HH:MM 停排时刻与非空原因</strong>，恢复时再填写恢复时刻。
+            同一版本只能有一段进行中的停排，时刻必须严格递增且<strong>不得覆盖已登记的实际开始 / 完成</strong>。
+            停排期间执行岗位的开始 / 预计结束 / 完成登记与新签认一律拒绝，<strong>发布新版也须先恢复</strong>；舞监更正、跳过仍可办理，但更正后的实际时刻不得落入停排区间。
+            恢复后：未开始项重算开始不早于最近恢复时刻，已开始未完成项的推算 / 预计结束顺延该段中断分钟；停排前有效双签失效，须双方重签后方可开始。
+          </p>
+          <div id="interruption-body"></div>
+        </div>
+        <div class="panel" id="deputy-panel" hidden>
+          <h3>岗位代班（仅当前执行版）</h3>
+          <p class="muted">
+            现场临时换人：为某岗位指定一名已有执行账号代班。代班期间原岗位账号失去该岗位登记权，
+            代班账号获得该岗位登记权并保留自己原有岗位权限；每个岗位至多一名在任代班。
+            发布新版后代班不自动延续；旧版代班记录在「发布版本」回看页只读可查。
+          </p>
+          <div class="deputy-form">
+            <select id="deputy-position"></select>
+            <select id="deputy-operator"></select>
+            <button id="deputy-enable" class="primary">启用代班</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>岗位</th><th>代班账号</th><th>状态</th><th>启用（操作者 / 时间）</th><th>撤销（操作者 / 时间）</th><th>操作</th></tr></thead>
+              <tbody id="deputy-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel" id="whatif-panel" hidden>
+          <h3>现场顺延预演（舞监 · 只读假设推演）</h3>
+          <p class="muted">
+            现场顺延时，可对当前执行版的<strong>一项或多项「未开始 / 已开始且未完成、未跳过」</strong>提示项填写<strong>假设预计结束时间</strong>，
+            系统以同一次读取的当前版本与全部登记行版本为基线，<strong>同时套用全部假设</strong>后按现有前置与跳过规则重算，
+            给出逐项待执行开始 / 结束的前后差异，以及同岗位冲突的<strong>新增 / 消失 / 仍存在</strong>对照。
+            预演为只读操作，不更改任何登记、已发布计划、跳过状态与更正历史；执行版或任一登记行已变化时整体拒绝并提示刷新，不返回混合时点结果。
+          </p>
+          <button id="whatif-open" class="primary" type="button">填写假设并重算预演…</button>
+        </div>
+        <div class="panel" id="review-panel" hidden>
+          <h3>执行版复盘（舞监）</h3>
+          <p class="muted">
+            按<strong>冻结计划、现场登记与停排记录</strong>逐项复盘：实际开始相对计划的<strong>有符号分钟偏差</strong>、实际持续分钟及<strong>扣除停排后的净执行分钟</strong>
+            （只扣实际起止区间与<strong>已结束停排段</strong>的交集，重叠分钟只扣一次）。跳过、未开始、进行中及<strong>交接自旧版的完成项</strong>分别标识，不计入本版完成汇总；
+            未完成项的实际持续与净执行分钟为空。另按岗位汇总本版完成数、净执行分钟与开始偏差之和。
+            更正登记或恢复联排后重新打开预览即更新。确认无误后可<strong>封存复盘</strong>：携所见执行版、登记行版本与停排状态封存，任一依据变化整体拒绝；每版仅能封存一次，明细与汇总作为当时快照保存，此后不得改写。
+          </p>
+          <button id="review-open" class="primary" type="button">查看复盘预览…</button>
+          <span id="review-sealed-tag"></span>
+        </div>
+        <div class="panel">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>编号</th><th>说明</th><th>岗位</th><th>计划</th><th>共享资源</th>
+                  <th>重算开始</th><th>重算结束</th><th>状态</th><th>放行签认</th><th>实际开始</th><th>实际完成</th><th>预计结束</th><th id="live-col-reg">岗位登记</th>
+                </tr>
+              </thead>
+              <tbody id="live-tbody"></tbody>
+            </table>
+          </div>
+          <p class="muted">
+            重算规则：未开始项按前置项的实际/预计结束顺延，且不早于原计划；已开始项保留实际开始时间。
+            顺延导致的岗位冲突以红条提示。点击「来源」可查看任一提示项排期开始时刻如何形成：
+            以原计划开始为基线，达到最终约束时刻的直接前置全部列出，并逐层标明实际完成 / 预计结束 / 按时长推算；
+            已跳过前置不构成约束，原计划本身决定开始时明确显示无需顺延。
+          </p>
+          <p class="muted" id="sm-correct-hint" hidden>
+            舞监可对<strong>当前执行版本</strong>任一行的实际开始 / 实际完成 / 预计结束进行一次单项更正或清除并填写原因；
+            更正只改现场登记，不改已发布计划；归档版本禁止更正。每次更正均留有前后值、操作者、时间与原因的记录。
+          </p>
+          <p class="muted" id="sm-skip-hint" hidden>
+            某项无法执行时，点该行「跳过链…」可<strong>预览触发项及沿前置关系可达的全部后继</strong>，填写非空原因确认后将整条依赖链标记为跳过：
+            链中任一项已有实际开始/完成（或预览后登记行变化）将整体拒绝、不留部分标记；首次跳过清除预计结束、保留已发布计划并记录操作者与时间；
+            已跳过项只展示、不重复留痕，执行账号不得再登记，舞监不得更正其时间。跳过项不计入待执行时段与岗位冲突；
+            仅当前执行版可操作，新发布版不继承跳过状态，旧版回看可见原因。
+          </p>
+          <p class="muted">
+            标记「需放行」的提示项须<strong>双人放行</strong>：当班执行人「签认就绪」+ 舞监「签认可执行」两类有效签认齐备后，岗位才能登记实际开始（预计结束与完成登记不受影响）。
+            每次签认记录签认人、时间及目标与直接前置项的登记行版本；目标或任一直接前置项的登记行变化、代班变更导致签认人失去登记权，都会使旧签认失效（需重新签认）。
+            签认状态与失效原因显示在「放行签认」列；新发布版不继承签认，历史版本可只读回看签认记录。
+          </p>
+        </div>
+      </div>
+
+      <!-- 已发布版本回看 -->
+      <div id="tab-versions" class="tabpane" hidden>
+        <div class="pane-head">
+          <h2>已发布版本</h2>
+          <button id="versions-reload" class="ghost">刷新</button>
+        </div>
+        <div class="panel">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>版本号</th><th>说明</th><th>发布时间</th><th>提示项</th><th>已有登记</th><th>已跳过</th><th>停排</th><th>复盘</th><th>操作</th></tr></thead>
+              <tbody id="versions-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="version-detail"></div>
+      </div>
+    </main>
+
+    <!-- 舞监：登记更正弹窗 -->
+    <div id="modal-overlay" class="modal-overlay" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3 id="modal-title"></h3>
+          <button id="modal-close" class="ghost tiny" type="button">关闭</button>
+        </div>
+        <div id="modal-body"></div>
+      </div>
+    </div>
+  </section>
+
+  <script src="/app.js"></script>
+</body>
+</html>

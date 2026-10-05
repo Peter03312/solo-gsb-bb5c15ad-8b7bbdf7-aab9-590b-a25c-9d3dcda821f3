@@ -1,0 +1,15 @@
+{
+  "name": "rehearsal-cueboard",
+  "version": "1.0.0",
+  "description": "剧场联排提示板：舞监发布只读联排版本，岗位登记实际执行时间",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "initdb": "node src/initdb.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1"
+  }
+}
