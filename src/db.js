@@ -216,6 +216,33 @@ CREATE TABLE IF NOT EXISTS rehearsal_reviews (
   sealed_at      TEXT NOT NULL              -- 封存时间
 );
 
+-- 顺延变更待确认：岗位登记、舞监更正、跳过链、停排、恢复使当前执行版某个「未开始、未跳过」提示项的
+-- 重算开始时刻在同次操作前后发生变化时，为该项所属岗位留一条待确认记录；未变化或已跳过项不留。
+-- 记录冻结版本、提示项（编号、说明、岗位）、变更前后时刻、触发操作与时间；同次操作影响多项分别留痕；
+-- 操作事务整体失败回滚，不产生任何记录。执行账号只能查看并确认当前有权负责岗位（含代班）的记录；
+-- 确认须携带所见记录的行版本（record_version），确认后仅推进本行版本（row_ver=2），不重复留痕、不改动登记；
+-- 版本归档或岗位权限变化时旧提交被拒绝。旧联排版本只读回看；发布新版不承接待确认（记录随版本保存，不迁移）。
+CREATE TABLE IF NOT EXISTS schedule_change_notices (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  version_id       INTEGER NOT NULL REFERENCES rehearsal_versions(id) ON DELETE CASCADE,
+  cue_ref          INTEGER NOT NULL,          -- 变更发生时该提示项引用
+  code             TEXT NOT NULL,             -- 冻结：提示项编号
+  title            TEXT NOT NULL DEFAULT '',  -- 冻结：提示项说明
+  position         TEXT NOT NULL,             -- 冻结：所属岗位（权限判定以此为准）
+  before_start     INTEGER NOT NULL,          -- 变更前重算开始（分钟）
+  after_start      INTEGER NOT NULL,          -- 变更后重算开始（分钟）
+  trigger_action   TEXT NOT NULL,             -- register/correct/skip/pause/resume
+  trigger_detail   TEXT NOT NULL,             -- 触发操作的可读说明（冻结）
+  trigger_cue_ref  INTEGER,                   -- 直接操作的提示项引用（停排/恢复为 NULL）
+  trigger_cue_code TEXT,                      -- 直接操作的提示项编号（停排/恢复为 NULL）
+  triggered_by     TEXT NOT NULL,             -- 触发操作者（显示名）
+  triggered_at     TEXT NOT NULL,             -- 触发操作时间戳
+  acknowledged_by  TEXT,                      -- 确认人（显示名，NULL=未确认）
+  acknowledged_by_username TEXT,              -- 确认人账号
+  acknowledged_at  TEXT,
+  row_ver          INTEGER NOT NULL DEFAULT 1 -- 1 待确认；确认后推进为 2（乐观锁，防止旧提交误确认）
+);
+
 -- 签认时直接前置项登记行版本快照（任一变化即失效）
 CREATE TABLE IF NOT EXISTS release_signoff_preds (
   signoff_id  INTEGER NOT NULL REFERENCES release_signoffs(id) ON DELETE CASCADE,
@@ -231,6 +258,9 @@ CREATE INDEX IF NOT EXISTS idx_corr_version ON registration_corrections(version_
 CREATE INDEX IF NOT EXISTS idx_deputies_version ON position_deputies(version_id);
 CREATE INDEX IF NOT EXISTS idx_skips_version ON registration_skips(version_id);
 CREATE INDEX IF NOT EXISTS idx_signoffs_version ON release_signoffs(version_id);
+CREATE INDEX IF NOT EXISTS idx_notices_version ON schedule_change_notices(version_id);
+CREATE INDEX IF NOT EXISTS idx_notices_pending
+  ON schedule_change_notices(version_id, position) WHERE row_ver = 1;
 CREATE INDEX IF NOT EXISTS idx_interruptions_version ON rehearsal_interruptions(version_id);
 -- 同一版本至多一段进行中的停排（部分唯一索引：resume_minute IS NULL 即进行中）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_interruptions_active

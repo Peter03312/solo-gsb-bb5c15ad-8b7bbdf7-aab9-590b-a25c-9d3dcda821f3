@@ -229,6 +229,15 @@ tr.pause-row-active td { background: #faf4ff; }
 .resource-banner li { margin: 4px 0; }
 .wi-res-head { margin: 12px 0 8px; font-size: 14px; }
 
+/* 顺延变更待确认 */
+.notice-table-wrap td, .notice-table-wrap th { font-size: 12px; vertical-align: top; white-space: normal; }
+.notice-table-wrap tr.notice-pending-row td { background: #fff8ec; }
+.notice-table-wrap tr.notice-pending-row:hover td { background: #fef3dd; }
+.notice-table-wrap tr.notice-acked td { color: #8a93a0; }
+.notice-detail { white-space: normal; max-width: 300px; line-height: 1.6; }
+.notice-trigger { display: inline-block; background: #e8eefc; color: #2f56c4; border-radius: 6px; padding: 1px 8px; font-size: 11px; }
+.notice-count { color: #b3541e; font-weight: 700; }
+
 /* 执行版复盘 */
 .review-table-wrap td, .review-table-wrap th { font-size: 12px; vertical-align: top; }
 .review-table-wrap tr.review-done-row td { background: #f3faf5; }

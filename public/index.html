@@ -156,6 +156,7 @@
         <div id="live-conflicts"></div>
         <div id="live-resource-alerts"></div>
         <div id="live-deputy-banner"></div>
+        <div id="live-change-notices"></div>
         <div class="panel" id="interruption-panel" hidden>
           <h3>联排中断：停排 / 恢复（仅当前执行版）</h3>
           <p class="muted">
@@ -184,6 +185,16 @@
               <tbody id="deputy-tbody"></tbody>
             </table>
           </div>
+        </div>
+        <div class="panel" id="change-notice-panel" hidden>
+          <h3>顺延变更待确认 <span id="change-notice-summary" class="muted"></span></h3>
+          <p class="muted">
+            岗位登记、舞监更正、跳过链、停排或恢复使某个<strong>尚未开始</strong>提示项的<strong>重算开始时刻</strong>变化时，
+            系统为该项所属岗位留下一条待确认记录（冻结版本、提示项、变更前后时刻、触发操作与时间）；未变化或已跳过项不留痕。
+            执行账号只能看到并确认<strong>自己当前负责岗位（含代班）</strong>的记录，确认须核对所见记录；
+            代班期间原账号失权、代班账号接手；版本归档或权限变化时旧提交会被拒绝。舞监可查看全部记录及各岗位未确认数；旧版本只读回看，新版不承接待确认。
+          </p>
+          <div id="change-notice-body"></div>
         </div>
         <div class="panel" id="whatif-panel" hidden>
           <h3>现场顺延预演（舞监 · 只读假设推演）</h3>
@@ -251,7 +262,7 @@
         <div class="panel">
           <div class="table-wrap">
             <table>
-              <thead><tr><th>版本号</th><th>说明</th><th>发布时间</th><th>提示项</th><th>已有登记</th><th>已跳过</th><th>停排</th><th>复盘</th><th>操作</th></tr></thead>
+              <thead><tr><th>版本号</th><th>说明</th><th>发布时间</th><th>提示项</th><th>已有登记</th><th>已跳过</th><th>停排</th><th>待确认</th><th>复盘</th><th>操作</th></tr></thead>
               <tbody id="versions-tbody"></tbody>
             </table>
           </div>

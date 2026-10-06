@@ -14,6 +14,8 @@ const state = {
   skipPreview: null,
   whatifInputs: new Map(),
   reviewEnv: null,
+  notices: null,
+  detailNotices: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -599,10 +601,91 @@ async function loadLive() {
     catch { state.deputies = null; }
   }
   renderLive();
+  loadLiveNotices().catch(() => { state.notices = null; renderChangeNoticePanel(); });
   if (state.me.role === 'sm' && state.live) {
     loadReviewLive().catch(() => { state.reviewEnv = null; renderReviewPanel(); });
   }
 }
+
+// ---------- 顺延变更待确认 ----------
+
+async function loadLiveNotices() {
+  if (!state.live) { state.notices = null; renderChangeNoticePanel(); return; }
+  state.notices = await api('GET', '/api/live/change-notices');
+  renderChangeNoticePanel();
+}
+
+function deltaText(n) {
+  const d = n.deltaMinutes;
+  const sign = d > 0 ? '+' : '';
+  return `<span class="${d > 0 ? 'wi-delay' : 'wi-advance'}">${sign}${d} 分</span>`;
+}
+
+function noticeRecordRow(n, { canAck }) {
+  const ackCell = n.acknowledged
+    ? `<span class="badge done">已确认</span><div class="muted">${esc(n.acknowledgedBy)}（${esc(n.acknowledgedByUsername || '')}）<br>${esc(n.acknowledgedAt)}</div>`
+    : (canAck
+      ? `<button class="primary tiny" data-act="ack-notice" data-id="${n.id}" data-ver="${n.recordVersion}">确认</button>`
+      : '<span class="badge pending">待确认</span>');
+  return `<tr class="${n.acknowledged ? 'notice-acked' : 'notice-pending-row'}">
+    <td><strong>${esc(n.code)}</strong><div class="muted">${esc(n.title || '')}</div></td>
+    <td>${esc(n.position)}</td>
+    <td class="mono">${esc(n.beforeStartText)} → <strong>${esc(n.afterStartText)}</strong> ${deltaText(n)}</td>
+    <td><span class="notice-trigger">${esc(n.triggerActionLabel)}</span><div class="muted notice-detail">${esc(n.triggerDetail)}</div></td>
+    <td class="mono">${esc(n.triggeredBy)}<br>${esc(n.triggeredAt)}</td>
+    <td>${ackCell}<div class="muted mono">记录 v${n.recordVersion}</div></td>
+  </tr>`;
+}
+
+function renderChangeNoticePanel() {
+  const panel = $('#change-notice-panel');
+  if (!panel) return;
+  const v = state.live;
+  const data = state.notices;
+  if (!v || !data) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const isSM = state.me.role === 'sm';
+  const posLine = isSM && data.positions?.length
+    ? `各岗位待确认：` + data.positions.map((p) => `「${esc(p.position)}」${p.pendingCount}`).join('、')
+    : '';
+  $('#change-notice-summary').textContent =
+    `（共 ${data.total} 条，待确认 ${data.pendingCount} 条${isSM ? `；${posLine}` : ''}）`;
+  const canAck = state.me.role === 'operator' && v.isLatest;
+  const body = $('#change-notice-body');
+  if (!data.records.length) {
+    body.innerHTML = '<div class="muted">当前没有顺延变更记录。</div>';
+    return;
+  }
+  const mine = isSM ? ''
+    : `<div class="muted">仅显示你当前负责岗位（${(data.myPositions || []).map(esc).join('、') || '无'}）的记录；代班期间以当班授权为准。</div>`;
+  body.innerHTML = `
+    ${mine}
+    <div class="table-wrap notice-table-wrap">
+      <table>
+        <thead><tr><th>提示项</th><th>岗位</th><th>重算开始（前 → 后）</th><th>触发操作</th><th>触发（人 / 时间）</th><th>确认</th></tr></thead>
+        <tbody>${data.records.map((n) => noticeRecordRow(n, { canAck })).join('')}</tbody>
+      </table>
+    </div>`;
+}
+
+// 确认一条待确认（携带所见 recordVersion；归档 / 失权 / 重复 / 旧版本均由服务端拒绝）
+$('#live-change-notices').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-act="ack-notice"]');
+  if (!btn) return;
+  const id = Number(btn.dataset.id);
+  const recordVersion = Number(btn.dataset.ver);
+  btn.disabled = true;
+  try {
+    const data = await api('POST', `/api/live/change-notices/${id}/acknowledge`, { recordVersion });
+    state.notices = data;
+    renderChangeNoticePanel();
+    alertBar('ok', '已确认该顺延变更（仅确认留痕，不改动任何登记）。');
+  } catch (e) {
+    alertBar('error', errorToHtml(e));
+    if (e.status === 409 || e.status === 403) loadLiveNotices().catch(() => {});
+    else btn.disabled = false;
+  }
+});
 
 // ---------- 舞监：执行版复盘（实时预览 + 封存） ----------
 
@@ -970,6 +1053,7 @@ $('#interruption-panel').addEventListener('submit', async (ev) => {
         `✅ 已在 ${resumeText} 恢复联排，排期与同岗位冲突已按中断顺延重算。` + (n ? ` 当前 ${n} 项冲突请查看红条。` : ''),
         n ? 9000 : 6000);
     }
+    loadLiveNotices().catch(() => {});
   } catch (e) {
     btn.disabled = false;
     alertBar('error', errorToHtml(e), 10000);
@@ -1078,6 +1162,7 @@ $('#live-tbody').addEventListener('click', async (ev) => {
         ? `登记成功，但出现 ${data.version.conflicts.length} 项顺延岗位冲突，请查看红色提示。`
         : '登记成功，重算结果已更新。');
     renderLive();
+    loadLiveNotices().catch(() => {});
   } catch (e) {
     alertBar('error', errorToHtml(e));
     if (e.status === 409) loadLive().catch(() => {});
@@ -1335,6 +1420,7 @@ $('#modal-overlay').addEventListener('submit', async (ev) => {
         : '链中项此前均已跳过，本次只展示、未重复留痕。',
       n ? 8000 : 5000);
     renderLive();
+    loadLiveNotices().catch(() => {});
   } catch (e) {
     btn.disabled = false;
     // 阻断 / 行版本变化：整体拒绝、无部分标记，重新拉取现场与预览
@@ -1732,6 +1818,7 @@ $('#modal-overlay').addEventListener('submit', async (ev) => {
       + (conflictN ? ` 当前存在 ${conflictN} 项顺延岗位冲突，请查看红色提示。` : ''),
       conflictN ? 10000 : 5000);
     renderLive();
+    loadLiveNotices().catch(() => {});
   } catch (e) {
     if (e.status === 409) {
       // 与岗位登记共用行版本：过期时拒绝并提示刷新，不能覆盖新登记
@@ -1962,6 +2049,7 @@ function renderVersions() {
       <td>${v.regCount}</td>
       <td>${v.skipCount ? `<span class="skip-count">⛔ ${v.skipCount}</span>` : 0}</td>
       <td>${v.interruptionCount ? `<span class="pause-count ${v.interruptionActive ? 'pause-count-active' : ''}">⏸ ${v.interruptionCount}${v.interruptionActive ? '（进行中）' : ''}</span>` : 0}</td>
+      <td>${v.noticePendingCount ? `<span class="notice-count" title="该版本尚有未确认的顺延变更${state.me?.role === 'sm' ? '（全岗位）' : '（你的岗位）'}">🔔 ${v.noticePendingCount}</span>` : '<span class="muted">0</span>'}</td>
       <td>${v.reviewSealed
         ? `<span class="review-sealed-tag" title="封存于 ${esc(v.reviewSealedAt || '')}">🔒 已封存</span>`
         : '<span class="muted">未封存</span>'}</td>
@@ -1970,7 +2058,7 @@ function renderVersions() {
         ${state.me?.role === 'sm' ? `<button class="ghost tiny" data-act="view-review" data-id="${v.id}">复盘</button>` : ''}
       </td>
     </tr>`).join('')
-    || '<tr><td colspan="9" class="muted">暂无已发布版本。</td></tr>';
+    || '<tr><td colspan="10" class="muted">暂无已发布版本。</td></tr>';
 }
 
 $('#versions-tbody').addEventListener('click', async (ev) => {
@@ -1983,7 +2071,11 @@ $('#versions-tbody').addEventListener('click', async (ev) => {
   if (!btn) return;
   try {
     state.detail = await api('GET', `/api/versions/${btn.dataset.id}`);
+    state.detailNotices = null;
     renderDetail();
+    api('GET', `/api/versions/${btn.dataset.id}/change-notices`)
+      .then((data) => { state.detailNotices = data; renderDetailNotices(); })
+      .catch(() => { state.detailNotices = null; renderDetailNotices(); });
   } catch (e) { alertBar('error', errorToHtml(e)); }
 });
 
@@ -2018,6 +2110,38 @@ $('#version-detail').addEventListener('click', (ev) => {
     if (cue) openSkipView(cue, v);
   }
 });
+
+function renderDetailNotices() {
+  const body = $('#detail-notice-body');
+  if (!body) return;
+  const data = state.detailNotices;
+  if (!data) { body.textContent = '暂无权限或记录加载失败。'; return; }
+  const isSM = state.me?.role === 'sm';
+  if (!data.records.length) {
+    body.textContent = isSM ? '该版本没有顺延变更记录。' : '该版本中没有你负责岗位的顺延变更记录。';
+    return;
+  }
+  const head = `<div class="muted" style="margin-bottom:8px">
+    共 ${data.total} 条，待确认 ${data.pendingCount} 条${data.isLatest ? '' : '（该版本已归档，记录只读，旧提交不能确认）'}
+    ${isSM && data.positions?.length ? '；' + data.positions.map((p) => `「${esc(p.position)}」待确认 ${p.pendingCount}`).join('、') : ''}
+  </div>`;
+  body.innerHTML = head + `
+    <div class="table-wrap notice-table-wrap">
+      <table>
+        <thead><tr><th>提示项</th><th>岗位</th><th>重算开始（前 → 后）</th><th>触发操作</th><th>触发（人 / 时间）</th><th>状态</th></tr></thead>
+        <tbody>${data.records.map((n) => `<tr class="${n.acknowledged ? 'notice-acked' : 'notice-pending-row'}">
+          <td><strong>${esc(n.code)}</strong><div class="muted">${esc(n.title || '')}</div></td>
+          <td>${esc(n.position)}</td>
+          <td class="mono">${esc(n.beforeStartText)} → <strong>${esc(n.afterStartText)}</strong> ${deltaText(n)}</td>
+          <td><span class="notice-trigger">${esc(n.triggerActionLabel)}</span><div class="muted notice-detail">${esc(n.triggerDetail)}</div></td>
+          <td class="mono">${esc(n.triggeredBy)}<br>${esc(n.triggeredAt)}</td>
+          <td>${n.acknowledged
+            ? `<span class="badge done">已确认</span><div class="muted">${esc(n.acknowledgedBy)}（${esc(n.acknowledgedByUsername || '')}）<br>${esc(n.acknowledgedAt)}</div>`
+            : '<span class="badge pending">待确认</span>'}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+}
 
 function renderDetail() {
   const v = state.detail;
@@ -2063,6 +2187,10 @@ function renderDetail() {
         v.resourceAlerts.map((a) => `<li>${esc(a.message)}</li>`).join('')}</ul></div>` : ''}
     ${interruptionHtml}
     ${deputyHtml}
+    <div class="panel" id="detail-notices-panel">
+      <h3>顺延变更待确认记录（只读）</h3>
+      <div id="detail-notice-body" class="muted">加载中…</div>
+    </div>
     <div class="panel"><div class="table-wrap"><table>
       <thead><tr><th>编号</th><th>说明</th><th>岗位</th><th>计划</th><th>共享资源</th><th>重算开始</th><th>重算结束</th><th>状态</th><th>放行签认</th><th>实际开始</th><th>实际完成</th><th>预计结束</th><th>登记人/时间</th>${state.me?.role === 'sm' ? '<th>更正</th>' : ''}</tr></thead>
       <tbody>${v.cues.map((c) => {
